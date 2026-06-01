@@ -1,0 +1,8 @@
+node_modules
+dist
+.vite
+.env
+__pycache__/
+*.pyc
+*.local
+vite-dev.*.log
