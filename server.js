@@ -9,6 +9,8 @@ const distRoot = resolve(appRoot, 'dist');
 const secret = cleanEnv('PSLE_ENG_TUTOR_SESSION_SECRET');
 const toolId = cleanEnv('PSLE_ENG_TUTOR_TOOL_ID') ?? 'psle-eng-tutor-brain';
 const cookieName = cleanEnv('PSLE_ENG_TUTOR_SESSION_COOKIE') ?? 'psle_eng_tutor_session';
+const launchVerifyUrl = cleanEnv('MARKETPLACE_LAUNCH_VERIFY_URL');
+const launchVerifySecret = cleanEnv('MARKETPLACE_LAUNCH_VERIFY_SECRET');
 const host = cleanEnv('HOST') ?? cleanEnv('HOSTNAME') ?? '0.0.0.0';
 const port = Number(cleanEnv('PORT') ?? 8080);
 
@@ -39,6 +41,24 @@ if (secret && Buffer.byteLength(secret) < 32) {
 
 if (!secret) {
   console.warn('[psle-eng-tutor] PSLE_ENG_TUTOR_SESSION_SECRET is not set; launch auth is disabled.');
+}
+
+if (launchVerifyUrl) {
+  if (!secret) {
+    throw new Error('PSLE_ENG_TUTOR_SESSION_SECRET is required when MARKETPLACE_LAUNCH_VERIFY_URL is set.');
+  }
+
+  if (!launchVerifySecret || Buffer.byteLength(launchVerifySecret) < 32) {
+    throw new Error('MARKETPLACE_LAUNCH_VERIFY_SECRET must be at least 32 bytes when MARKETPLACE_LAUNCH_VERIFY_URL is set.');
+  }
+
+  try {
+    new URL(launchVerifyUrl);
+  } catch {
+    throw new Error('MARKETPLACE_LAUNCH_VERIFY_URL must be a valid URL.');
+  }
+} else if (launchVerifySecret) {
+  console.warn('[psle-eng-tutor] MARKETPLACE_LAUNCH_VERIFY_SECRET is set but MARKETPLACE_LAUNCH_VERIFY_URL is missing; logout revocation checks are disabled.');
 }
 
 function cleanEnv(name) {
@@ -104,6 +124,10 @@ function verifyLaunchToken(token) {
     throw new Error('Launch token has expired.');
   }
 
+  if (!Number.isFinite(payload.iat) || payload.iat > now + 30) {
+    throw new Error('Launch token has an invalid issued-at timestamp.');
+  }
+
   if (typeof payload.user_id !== 'string' || !payload.user_id.trim()) {
     throw new Error('Launch token is missing user_id.');
   }
@@ -115,6 +139,7 @@ function verifyLaunchToken(token) {
   return {
     email: typeof payload.email === 'string' && payload.email.trim() ? payload.email.trim() : null,
     exp: Math.trunc(payload.exp),
+    iat: Math.trunc(payload.iat),
     install_id: typeof payload.install_id === 'string' && payload.install_id.trim() ? payload.install_id.trim() : null,
     tool_id: payload.tool_id,
     user_id: payload.user_id.trim()
@@ -150,6 +175,10 @@ function verifySession(value) {
   }
 
   if (session.tool_id !== toolId || typeof session.user_id !== 'string' || !session.user_id.trim()) {
+    return null;
+  }
+
+  if (launchVerifyUrl && (!Number.isFinite(session.iat) || typeof session.install_id !== 'string' || !session.install_id.trim())) {
     return null;
   }
 
@@ -258,6 +287,41 @@ function launchTokenFromUrl(url) {
   );
 }
 
+async function verifyLaunchSession(session) {
+  if (!launchVerifyUrl) {
+    return;
+  }
+
+  if (!session?.install_id || !Number.isFinite(session.iat)) {
+    throw new Error('Launch session is missing 2ndBrain verification data.');
+  }
+
+  const response = await fetch(launchVerifyUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${launchVerifySecret}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      installId: session.install_id,
+      issuedAt: session.iat,
+      toolId: session.tool_id,
+      userId: session.user_id
+    })
+  });
+  let payload = null;
+
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok || !payload?.active) {
+    throw new Error(payload?.error || `2ndBrain launch verification failed with ${response.status}`);
+  }
+}
+
 function stripLaunchParams(url) {
   ['token', 'launch_token', '2ndbrain_launch_token'].forEach((name) => {
     url.searchParams.delete(name);
@@ -312,12 +376,13 @@ function authenticatedSession(request) {
   }
 }
 
-const server = http.createServer((request, response) => {
+async function handleRequest(request, response) {
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
 
   if (url.pathname === '/healthz') {
     json(response, 200, {
       launchAuthRequired: Boolean(secret),
+      launchLivenessRequired: Boolean(launchVerifyUrl),
       ok: true
     });
     return;
@@ -328,6 +393,7 @@ const server = http.createServer((request, response) => {
   if (launchToken) {
     try {
       const session = verifyLaunchToken(launchToken);
+      await verifyLaunchSession(session);
 
       response.writeHead(302, {
         'Cache-Control': 'no-store',
@@ -343,6 +409,16 @@ const server = http.createServer((request, response) => {
   }
 
   const session = authenticatedSession(request);
+  let sessionError = null;
+
+  if (session) {
+    try {
+      await verifyLaunchSession(session);
+    } catch (error) {
+      sessionError = error;
+      response.setHeader('Set-Cookie', clearSessionCookie());
+    }
+  }
 
   if (url.pathname === '/api/session') {
     if (!secret) {
@@ -353,9 +429,10 @@ const server = http.createServer((request, response) => {
       return;
     }
 
-    if (!session) {
+    if (!session || sessionError) {
       json(response, 401, {
         authenticated: false,
+        error: sessionError instanceof Error ? sessionError.message : undefined,
         launchAuthRequired: true
       });
       return;
@@ -372,8 +449,12 @@ const server = http.createServer((request, response) => {
     return;
   }
 
-  if (secret && !session) {
-    html(response, 401, launchRequiredPage());
+  if (secret && (!session || sessionError)) {
+    html(
+      response,
+      401,
+      launchRequiredPage(sessionError instanceof Error ? sessionError.message : undefined)
+    );
     return;
   }
 
@@ -385,9 +466,18 @@ const server = http.createServer((request, response) => {
   }
 
   serveFile(response, path);
+}
+
+const server = http.createServer((request, response) => {
+  handleRequest(request, response).catch((error) => {
+    console.error('[psle-eng-tutor] request failed', error);
+    response.setHeader('Set-Cookie', clearSessionCookie());
+    html(response, 500, launchRequiredPage('The tutor could not verify this launch session.'));
+  });
 });
 
 server.listen(port, host, () => {
   console.log(`[psle-eng-tutor] serving ${distRoot} on http://${host}:${port}`);
   console.log(`[psle-eng-tutor] launch auth ${secret ? 'enabled' : 'disabled'} for tool ${toolId}`);
+  console.log(`[psle-eng-tutor] launch liveness ${launchVerifyUrl ? 'enabled' : 'disabled'}`);
 });

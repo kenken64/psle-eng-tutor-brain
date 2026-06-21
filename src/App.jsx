@@ -24,6 +24,7 @@ const assetBaseUrl = (configuredAssetBaseUrl || fallbackBaseUrl).replace(/\/$/, 
 const imageCrossOrigin = configuredAssetBaseUrl ? 'anonymous' : undefined;
 const manifestUrl = `${assetBaseUrl}/converted-images/manifest.json`;
 const markdownManifestUrl = `${assetBaseUrl}/markdown-manifest.json`;
+const authCheckIntervalMs = 15000;
 const collator = new Intl.Collator(undefined, {
   numeric: true,
   sensitivity: 'base',
@@ -311,9 +312,23 @@ function extractSnipEmbeds(markdownText) {
   return matches;
 }
 
+function LaunchExpired({ message }) {
+  return (
+    <main className="launch-expired">
+      <section className="launch-expired-panel">
+        <p className="section-label">2ndBrain launch auth</p>
+        <h1>Launch required</h1>
+        <p>{message || 'This tutor session is no longer active. Launch it again from 2ndBrain.'}</p>
+      </section>
+    </main>
+  );
+}
+
 export default function App() {
   const snipImageRef = useRef(null);
   const snipMarkdownRef = useRef(null);
+  const [authExpired, setAuthExpired] = useState(false);
+  const [authExpiredMessage, setAuthExpiredMessage] = useState('');
   const [manifest, setManifest] = useState(null);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
@@ -342,6 +357,43 @@ export default function App() {
   const [snipSaving, setSnipSaving] = useState(false);
   const [snipMarkdownSaving, setSnipMarkdownSaving] = useState(false);
   const [snipStatus, setSnipStatus] = useState('');
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function checkSession() {
+      try {
+        const response = await fetch('/api/session', { cache: 'no-store' });
+
+        if (response.status !== 401) {
+          return;
+        }
+
+        let payload = null;
+
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+
+        if (!ignore) {
+          setAuthExpired(true);
+          setAuthExpiredMessage(payload?.error || 'This tutor session is no longer active. Launch it again from 2ndBrain.');
+        }
+      } catch {
+        // Local Vite development does not expose the production auth endpoint.
+      }
+    }
+
+    checkSession();
+    const timer = window.setInterval(checkSession, authCheckIntervalMs);
+
+    return () => {
+      ignore = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     let ignore = false;
@@ -1171,6 +1223,10 @@ export default function App() {
         </div>
       </>
     );
+  }
+
+  if (authExpired) {
+    return <LaunchExpired message={authExpiredMessage} />;
   }
 
   return (

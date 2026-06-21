@@ -56,6 +56,8 @@ When `VITE_ASSET_BASE_URL` is set, image and markdown assets are loaded from tha
 
 `PSLE_ENG_TUTOR_SESSION_SECRET` enables 2ndBrain launch auth for production. Use the same value in 2ndBrain.ceo so it can sign short-lived marketplace launch tokens. Keep this value server-side only.
 
+Set `MARKETPLACE_LAUNCH_VERIFY_URL` and `MARKETPLACE_LAUNCH_VERIFY_SECRET` to make active tutor sessions expire when the user logs out of 2ndBrain. The URL should point to `https://your-2ndbrain-domain/api/marketplace/launch-session/verify`, and the secret must match `MARKETPLACE_LAUNCH_VERIFY_SECRET` in 2ndBrain.ceo.
+
 ## Development
 
 Start the dev server:
