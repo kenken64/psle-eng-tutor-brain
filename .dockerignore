@@ -1,0 +1,12 @@
+.git
+node_modules
+dist
+.vite
+.env
+.env*.local
+material
+converted-images
+snips
+*.log
+__pycache__/
+*.pyc
